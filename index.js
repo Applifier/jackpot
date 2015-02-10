@@ -177,9 +177,8 @@ Manager.prototype.allocate = function allocate(fn) {
     fn(new Error('Timed out while trying to establish connection'), this);
   }
 
-  var probabilities = []
-    , self = this
-    , total, i, probability, connection;
+  var self = this
+    , total, i, isAvailable, connection;
 
   i = total = this.pool.length;
 
@@ -190,20 +189,13 @@ Manager.prototype.allocate = function allocate(fn) {
   // we don't have to generate a new connection
   while (i--) {
     connection = this.pool[i];
-    probability = this.isAvailable(connection);
+    isAvailable = this.isAvailable(connection);
 
     // we are sure this connection works
-    if (probability === 100) {
+    if (isAvailable) {
       fn(undefined, connection);
       return this;
     }
-
-    // no accurate match, add it to the queue as we can get the most likely
-    // available connection
-    probabilities.push({
-        probability: probability
-      , connection: connection
-    });
   }
 
   // we didn't find a confident match, see if we are allowed to generate a fresh
@@ -240,19 +232,6 @@ Manager.prototype.allocate = function allocate(fn) {
     }
   }
 
-  // o, dear, we got issues.. we didn't find a valid connection and we cannot
-  // create more.. so we are going to check if we might have semi valid
-  // connection by sorting the probabilities array and see if it has
-  // a probability above 60
-  probability = probabilities.sort(function sort(a, b) {
-    return a.probability - b.probability;
-  }).pop();
-
-  if (probability && probability.probability >= 60) {
-    fn(undefined, probability.connection);
-    return this;
-  }
-
   // well, that didn't work out, so assume failure
   fn(new Error('The connection pool is full'));
   return this;
@@ -262,11 +241,10 @@ Manager.prototype.allocate = function allocate(fn) {
  * Check if a connection is available for writing.
  *
  * @param {net.Connection} net The connection.
- * @param {Boolean} ignore Ignore closed or dead connections.
- * @returns {Number} Probability that his connection is available or will be.
+ * @returns {Boolean} true, if connection available
  * @api private
  */
-Manager.prototype.isAvailable = function isAvailable(net, ignore) {
+Manager.prototype.isAvailable = function isAvailable(net) {
   var readyState = net.readyState
     , writable = readyState === 'open' || readyState === 'writeOnly'
     , writePending = net._pendingWriteReqs || 0
@@ -275,28 +253,16 @@ Manager.prototype.isAvailable = function isAvailable(net, ignore) {
 
   // If the stream is writable and we don't have anything pending we are 100%
   // sure that this stream is available for writing.
-  if (writable && writes === 0) return 100;
+  if (writable && writes === 0) return true;
 
   // The connection is already closed or has been destroyed, why on earth are we
   // getting it then, remove it from the pool and return 0.
   if (readyState === 'closed' || net.destroyed) {
     this.remove(net);
-    return 0;
   }
 
-  // If the stream isn't writable we aren't that sure..
-  if (!writable) return 0;
-
-  // The connection is still opening, so we can write to it in the future.
-  if (readyState === 'opening') return 70;
-
-  // We have some writes, so we are going to subtract that amount from our 100.
-  if (writes < 100) return 100 - writes;
-
-  // We didn't find any reliable states of the stream, so we are going to
-  // assume something random, because we have no clue, so generate a random
-  // number between 0 - 70.
-  return Math.floor(Math.random() * 70);
+  // Unknown, reserved or non-writable state, just return zero until connection resolves.
+  return false;
 };
 
 /**
@@ -348,10 +314,10 @@ Manager.prototype.free = function free(keep, hard) {
 
   for (var i = 0, length = pool.length; i < length; i++) {
     var connection = pool[i]
-      , probability = this.isAvailable(connection);
+      , isAvailable = this.isAvailable(connection);
 
     // This is still a healthy connection, so try we probably just want to keep it.
-    if (keep && saved < keep && probability === 100) {
+    if (keep && saved < keep && isAvailable) {
       saved++;
       continue;
     }
